@@ -1,21 +1,29 @@
-"""Extract structured event data from a news article via the LLM."""
+"""Extract structured event data from an article or primary-source
+document via the LLM.
+
+Two prompts live alongside each other:
+- prompts/extract_event.txt  (news-event extraction; tier="framing")
+- prompts/extract_action.txt (primary-source extraction; tier="action")
+
+Each prompt declares its own `PROMPT VERSION:` in the leading comment
+block and that version is stamped onto every extracted event for
+auditability.
+"""
 
 from __future__ import annotations
 
 import json
 import re
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 from src.llm import GeminiClient
 
-PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "extract_event.txt"
+PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
+PROMPT_PATH = PROMPTS_DIR / "extract_event.txt"            # news / framing
+ACTION_PROMPT_PATH = PROMPTS_DIR / "extract_action.txt"    # primary source / action
 
 _VERSION_RE = re.compile(r"#\s*PROMPT VERSION:\s*(\S+)")
-
-
-def _load_prompt_template() -> str:
-    return PROMPT_PATH.read_text(encoding="utf-8")
 
 
 def _parse_prompt_version(text: str) -> str:
@@ -27,11 +35,27 @@ def _parse_prompt_version(text: str) -> str:
     return "unknown"
 
 
-# Loaded once at import. The user explicitly wanted "on initialization"
-# semantics, and it lets us tag every event with the version of the
-# prompt that produced it without re-parsing per call.
-_PROMPT_TEMPLATE = _load_prompt_template()
-PROMPT_VERSION = _parse_prompt_version(_PROMPT_TEMPLATE)
+# Per-path cache: each prompt file is read once and its (template,
+# version) memoized. This keeps the news pipeline's "load once on
+# initialization" behavior intact while letting the action pipeline
+# resolve its own prompt without paying the read cost per call.
+_PROMPT_CACHE: dict = {}
+
+
+def _get_prompt(prompt_path: Path) -> Tuple[str, str]:
+    cached = _PROMPT_CACHE.get(prompt_path)
+    if cached is not None:
+        return cached
+    text = prompt_path.read_text(encoding="utf-8")
+    version = _parse_prompt_version(text)
+    _PROMPT_CACHE[prompt_path] = (text, version)
+    return text, version
+
+
+# Eagerly resolve the news prompt's version so existing code paths
+# (reextract.py, audit_versions.py) that import PROMPT_VERSION at the
+# module level continue to see the news/framing version.
+_PROMPT_TEMPLATE, PROMPT_VERSION = _get_prompt(PROMPT_PATH)
 
 
 def _fill_prompt(template: str, article: dict) -> str:
@@ -45,17 +69,25 @@ def _fill_prompt(template: str, article: dict) -> str:
     )
 
 
-def extract_event(article: dict, client: Optional[GeminiClient] = None) -> dict:
-    """Extract a structured event from an article dict.
+def extract_event(
+    article: dict,
+    client: Optional[GeminiClient] = None,
+    prompt_path: Path = PROMPT_PATH,
+) -> dict:
+    """Extract a structured event from an article-shape dict.
 
     article keys: source, date, title, body, url
-    Returns the LLM's event dict with article metadata merged in for
-    traceability (source, date, url, prompt_version).
+
+    By default uses the news/framing prompt. Pass `prompt_path` to use
+    a different extraction prompt (e.g. ACTION_PROMPT_PATH for primary-
+    source documents). The returned event is stamped with the prompt
+    version that produced it.
     """
     if client is None:
         client = GeminiClient()
 
-    prompt = _fill_prompt(_PROMPT_TEMPLATE, article)
+    template, version = _get_prompt(prompt_path)
+    prompt = _fill_prompt(template, article)
     event = client.extract_json(prompt)
 
     # Carry through provenance so downstream code can audit any event
@@ -64,8 +96,23 @@ def extract_event(article: dict, client: Optional[GeminiClient] = None) -> dict:
     event["source"] = article.get("source")
     event["date"] = article.get("date")
     event["url"] = article.get("url")
-    event["prompt_version"] = PROMPT_VERSION
+    event["prompt_version"] = version
     return event
+
+
+def extract_action_event(
+    article: dict,
+    client: Optional[GeminiClient] = None,
+) -> dict:
+    """Extract an action-tier event using the primary-source prompt.
+
+    Same article-shape dict as extract_event(). Callers (e.g.
+    pipeline_actions.py) shape the FR document into this shape: pass
+    the document type as `source`, publication date as `date`, doc
+    title and body as you'd expect. The agencies list, if any, can be
+    prepended to the body so the LLM sees it.
+    """
+    return extract_event(article, client=client, prompt_path=ACTION_PROMPT_PATH)
 
 
 if __name__ == "__main__":

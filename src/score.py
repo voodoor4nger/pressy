@@ -293,12 +293,24 @@ def _row_to_event(row) -> dict:
     }
 
 
-def _load_recent_events(conn, as_of_date: date) -> List[dict]:
-    """Load all events within the hard cutoff, latest-per-article only."""
+def _load_recent_events(
+    conn,
+    as_of_date: date,
+    tier: Optional[str] = None,
+) -> List[dict]:
+    """Load all events within the hard cutoff, latest-per-article only.
+
+    `tier`, if set, filters at the row level — events with tiers other
+    than the given value are dropped before computation. The math is
+    unchanged; this is just a query filter."""
     cutoff = as_of_date - timedelta(days=HARD_CUTOFF_DAYS)
     rows = db.get_latest_event_per_article(conn, since_datetime=datetime.combine(cutoff, datetime.min.time()))
     out = []
     for r in rows:
+        if tier is not None:
+            row_tier = r["tier"] if "tier" in r.keys() else "framing"
+            if row_tier != tier:
+                continue
         e = _row_to_event(r)
         if e["event_date"] is None:
             continue
@@ -306,8 +318,16 @@ def _load_recent_events(conn, as_of_date: date) -> List[dict]:
     return out
 
 
-def compute_scores(as_of_date: Optional[date] = None) -> ScoreResult:
-    """End-to-end: load config, load events from DB, compute, return."""
+def compute_scores(
+    as_of_date: Optional[date] = None,
+    tier: Optional[str] = None,
+) -> ScoreResult:
+    """End-to-end: load config, load events from DB, compute, return.
+
+    `tier` (optional) restricts the input to events of one tier
+    ("framing" or "action"). The scoring math is identical regardless
+    of tier; this is just a load-time filter that lets callers compute
+    per-tier sub-scores without touching the math."""
     if as_of_date is None:
         as_of_date = date.today()
     as_of_date = _to_date(as_of_date)
@@ -320,7 +340,7 @@ def compute_scores(as_of_date: Optional[date] = None) -> ScoreResult:
     months_into_term = (as_of_date - term_start_date).days / DAYS_PER_MONTH
 
     with db.connect(DB_PATH) as conn:
-        events = _load_recent_events(conn, as_of_date)
+        events = _load_recent_events(conn, as_of_date, tier=tier)
 
     category_scores: dict = {}
     audit_trail: dict = {}

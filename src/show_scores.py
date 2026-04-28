@@ -5,7 +5,15 @@ Usage:
     python -m src.show_scores --as-of 2026-04-27
     python -m src.show_scores --verbose
 
-Read-only against the events table.
+Reads from the events table and renders three sub-scores per category:
+- Framing (tier='framing'): events extracted from news articles
+- Action  (tier='action'):  events extracted from primary-source
+                            government documents (Federal Register)
+- Blend:  provisional 50/50 average. Treated as a placeholder while we
+          accumulate enough action-tier data to calibrate a real blend.
+          See docs/scoring.md (composite section) — once the analyst
+          decides on weighting, update both the spec and the blend
+          calculation here.
 """
 
 from __future__ import annotations
@@ -41,6 +49,10 @@ CATEGORY_DISPLAY = {
 
 CATEGORY_COL_WIDTH = 22
 
+# Provisional blend weights — 50/50 framing/action. Update once the
+# analyst calibrates real weights based on observed action data.
+BLEND_WEIGHTS = {"framing": 0.5, "action": 0.5}
+
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
@@ -59,12 +71,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 
 def _load_event_meta(event_ids: List[int]) -> dict:
-    """Look up titles, sources, and dates for a list of event IDs."""
+    """Look up titles, sources, dates, and tier for a list of event IDs."""
     if not event_ids:
         return {}
     placeholders = ",".join("?" * len(event_ids))
     sql = f"""
-        SELECT e.id, e.event_title,
+        SELECT e.id, e.event_title, e.tier,
                COALESCE(a.published_date, e.extracted_at) AS event_date,
                s.name AS source_name
         FROM events e
@@ -78,7 +90,6 @@ def _load_event_meta(event_ids: List[int]) -> dict:
 
 
 def _format_signed(x: float, places: int = 0) -> str:
-    """Signed integer or float, with sign always present."""
     if places == 0:
         n = int(round(x))
         return f"{n:+d}"
@@ -86,7 +97,6 @@ def _format_signed(x: float, places: int = 0) -> str:
 
 
 def _format_event_date(s: str) -> str:
-    """Trim a stored date to YYYY-MM-DD if we can; else pass through."""
     if not s:
         return ""
     try:
@@ -103,103 +113,141 @@ def _format_event_date(s: str) -> str:
     return s[:10]
 
 
-def render_summary(result, out=sys.stdout) -> None:
+def _category_blend(framing_score: float, action_score: float) -> float:
+    """Provisional 50/50 weighted average of framing and action scores."""
+    wf = BLEND_WEIGHTS["framing"]
+    wa = BLEND_WEIGHTS["action"]
+    return (framing_score * wf + action_score * wa) / (wf + wa)
+
+
+def render_summary(framing_result, action_result, out=sys.stdout) -> None:
+    """Side-by-side framing / action / blend summary table."""
     print("Pressy administration scores", file=out)
     print(
-        f"As of: {result.as_of_date} "
-        f"({result.months_into_term:.0f} months into term, "
-        f"k-factor: {result.k_factor:.2f})",
+        f"As of: {framing_result.as_of_date} "
+        f"({framing_result.months_into_term:.0f} months into term, "
+        f"k-factor: {framing_result.k_factor:.2f})",
         file=out,
     )
-    print(f"Events in window: {result.event_count_in_window}", file=out)
+    print(
+        f"Events in window: {framing_result.event_count_in_window} framing, "
+        f"{action_result.event_count_in_window} action",
+        file=out,
+    )
+    print(
+        f"Blend: {int(BLEND_WEIGHTS['framing']*100)}% framing / "
+        f"{int(BLEND_WEIGHTS['action']*100)}% action (provisional)",
+        file=out,
+    )
     print("", file=out)
 
     header = (
         f"{'Category':<{CATEGORY_COL_WIDTH}}"
         f"{'Baseline':>10}"
-        f"{'Score':>8}"
-        f"{'Deviation':>12}"
-        f"   {'Outlook'}"
+        f"{'Framing':>10}"
+        f"{'Action':>10}"
+        f"{'Blend':>10}"
+        f"   {'Outlook (framing)'}"
     )
     print(header, file=out)
-    print("─" * (CATEGORY_COL_WIDTH + 10 + 8 + 12 + 13), file=out)
+    print("─" * (CATEGORY_COL_WIDTH + 10 + 10 + 10 + 10 + 22), file=out)
 
     for cat in CATEGORY_ORDER:
-        s = result.category_scores.get(cat)
-        if s is None:
+        f = framing_result.category_scores.get(cat)
+        a = action_result.category_scores.get(cat)
+        if f is None and a is None:
             continue
+        # Both per-tier results are computed against the same baseline,
+        # so picking either is fine.
+        baseline = (f or a)["baseline"]
+        framing_score = (f or a)["score"] if f is None else f["score"]
+        action_score = (a or f)["score"] if a is None else a["score"]
+        blend_score = _category_blend(framing_score, action_score)
+        outlook = (f or a)["outlook"]
+
         label = CATEGORY_DISPLAY[cat]
         print(
             f"{label:<{CATEGORY_COL_WIDTH}}"
-            f"{s['baseline']:>10}"
-            f"{int(round(s['score'])):>8}"
-            f"{_format_signed(s['deviation']):>12}"
-            f"   {s['outlook']}",
+            f"{baseline:>10}"
+            f"{int(round(framing_score)):>10}"
+            f"{int(round(action_score)):>10}"
+            f"{int(round(blend_score)):>10}"
+            f"   {outlook}",
             file=out,
         )
 
     print("", file=out)
+    framing_composite = int(round(framing_result.composite))
+    action_composite = int(round(action_result.composite))
+    blend_composite = int(round(_category_blend(
+        framing_result.composite, action_result.composite,
+    )))
     print(
-        f"Composite: {int(round(result.composite))} / "
-        f"{result.composite_outlook} outlook",
+        f"Composite — framing: {framing_composite}  "
+        f"action: {action_composite}  "
+        f"blend: {blend_composite}  "
+        f"({framing_result.composite_outlook} framing outlook)",
         file=out,
     )
 
 
-def render_audit(result, out=sys.stdout) -> None:
-    """Per-category contribution detail."""
-    # Collect all event ids referenced across categories so we can
-    # batch-load metadata (title, source, date).
-    all_ids = sorted({eid for evs in result.audit_trail.values() for (eid, _w) in evs})
+def render_audit(framing_result, action_result, out=sys.stdout) -> None:
+    """Per-category contribution detail across both tiers.
+
+    Contributing events from both tiers are merged per category,
+    sorted by absolute weighted impact, and labeled with their tier."""
+    all_ids = sorted({
+        eid
+        for result in (framing_result, action_result)
+        for evs in result.audit_trail.values()
+        for (eid, _w) in evs
+    })
     meta = _load_event_meta(all_ids)
 
     print("", file=out)
     print("── AUDIT TRAIL ──", file=out)
     for cat in CATEGORY_ORDER:
-        s = result.category_scores.get(cat)
-        if s is None:
+        f = framing_result.category_scores.get(cat)
+        a = action_result.category_scores.get(cat)
+        if f is None and a is None:
             continue
         label = CATEGORY_DISPLAY[cat]
+        framing_score = f["score"] if f else (a["baseline"] if a else 0)
+        action_score = a["score"] if a else (f["baseline"] if f else 0)
+        blend_score = _category_blend(framing_score, action_score)
+
         print(
-            f"\n{label} (baseline {s['baseline']}, "
-            f"deviation {_format_signed(s['deviation'])}, "
-            f"score {int(round(s['score']))}, "
-            f"{s['outlook']} outlook)",
+            f"\n{label} "
+            f"(framing {int(round(framing_score))}, "
+            f"action {int(round(action_score))}, "
+            f"blend {int(round(blend_score))})",
             file=out,
         )
-        contrib = s["contributing_events"]
+
+        contrib: list = []
+        if f:
+            contrib.extend(f["contributing_events"])
+        if a:
+            contrib.extend(a["contributing_events"])
+
         if not contrib:
             print("  (no contributing events)", file=out)
             continue
 
-        # Sort by absolute weighted impact, descending — biggest movers first.
         contrib_sorted = sorted(contrib, key=lambda t: abs(t[1]), reverse=True)
-
         print("  Contributing events:", file=out)
         for eid, weight in contrib_sorted:
             m = meta.get(eid)
             if m:
+                tier = m["tier"] if "tier" in m.keys() else "framing"
+                tier_label = f"[{tier}]".ljust(10)
                 print(
-                    f"    {weight:+6.2f}  {m['event_title']} "
+                    f"    {weight:+6.2f}  {tier_label} {m['event_title']} "
                     f"({_format_event_date(m['event_date'])}, {m['source_name']})",
                     file=out,
                 )
             else:
                 print(f"    {weight:+6.2f}  (event {eid} not found)", file=out)
-
-        total_weighted = sum(w for (_eid, w) in contrib)
-        post_k = total_weighted * result.k_factor
-        print(f"  Total weighted: {total_weighted:+.2f}", file=out)
-        print(
-            f"  After k-factor ({result.k_factor:.2f}): {post_k:+.2f}",
-            file=out,
-        )
-        if abs(s["raw_deviation"]) > s["band_size"]:
-            print(
-                f"  NOTE: raw deviation {s['raw_deviation']:+.2f} exceeds "
-                f"band ±{s['band_size']} — clamped.",
-                file=out,
-            )
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -213,11 +261,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                   file=sys.stderr)
             return 2
 
-    result = compute_scores(as_of_date=as_of)
+    framing_result = compute_scores(as_of_date=as_of, tier="framing")
+    action_result = compute_scores(as_of_date=as_of, tier="action")
 
-    render_summary(result)
+    render_summary(framing_result, action_result)
     if args.verbose:
-        render_audit(result)
+        render_audit(framing_result, action_result)
     return 0
 
 

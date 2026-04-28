@@ -52,10 +52,14 @@ CREATE TABLE IF NOT EXISTS events (
     confidence TEXT NOT NULL,
     is_relevant INTEGER NOT NULL,                   -- 0/1
     extracted_at TEXT NOT NULL DEFAULT (datetime('now')),
-    prompt_version TEXT NOT NULL DEFAULT 'v2'       -- 'v2' is the migration backfill
+    prompt_version TEXT NOT NULL DEFAULT 'v2',      -- 'v2' is the migration backfill
+    tier TEXT NOT NULL DEFAULT 'framing',           -- framing | action | outcome
+    primary_source_id TEXT                          -- e.g. FR document number; nullable
 );
 
 CREATE INDEX IF NOT EXISTS idx_events_article ON events(article_id);
+-- idx_events_tier and idx_events_primary_source are created in _migrate()
+-- after the ALTER TABLE for those columns runs on existing DBs.
 
 CREATE TABLE IF NOT EXISTS runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -95,6 +99,25 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE events ADD COLUMN prompt_version TEXT NOT NULL DEFAULT 'v2'"
         )
+    if "tier" not in existing_event_cols:
+        # All pre-existing events came from the news pipeline, so they
+        # are framing-tier by definition.
+        conn.execute(
+            "ALTER TABLE events ADD COLUMN tier TEXT NOT NULL DEFAULT 'framing'"
+        )
+    if "primary_source_id" not in existing_event_cols:
+        # Nullable: only action-tier events have a stable upstream ID.
+        conn.execute(
+            "ALTER TABLE events ADD COLUMN primary_source_id TEXT"
+        )
+    # Indexes for the new columns. Idempotent — `IF NOT EXISTS` makes
+    # this safe to call on every connection. Lives here (not in SCHEMA)
+    # so it runs after the ALTER TABLEs above on legacy DBs.
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_tier ON events(tier)")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_events_primary_source "
+        "ON events(primary_source_id)"
+    )
 
 
 @contextmanager
@@ -151,18 +174,26 @@ def save_event(
     conn: sqlite3.Connection,
     article_id: int,
     event: dict,
+    tier: str = "framing",
+    primary_source_id: Optional[str] = None,
 ) -> int:
     """Insert an event from extract_event() output. Categories and
     framing_indicators are serialized to JSON text. Always inserts —
     re-extractions append a new row and the older row is kept as audit
     trail. Use get_latest_event_per_article() to read only the newest
-    event per article."""
+    event per article.
+
+    tier defaults to 'framing' so the news pipeline keeps working
+    unchanged. Action-tier callers pass tier='action' and the upstream
+    primary_source_id (e.g. an FR document number) for dedup.
+    """
     cur = conn.execute(
         """INSERT INTO events
            (article_id, event_title, categories, impact_direction,
             impact_magnitude, neutral_summary, framing_indicators,
-            confidence, is_relevant, prompt_version)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            confidence, is_relevant, prompt_version, tier,
+            primary_source_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             article_id,
             event["event_title"],
@@ -174,9 +205,25 @@ def save_event(
             event["confidence"],
             1 if event.get("is_relevant") else 0,
             event.get("prompt_version", "unknown"),
+            tier,
+            primary_source_id,
         ),
     )
     return cur.lastrowid
+
+
+def action_already_processed(
+    conn: sqlite3.Connection,
+    primary_source_id: str,
+) -> bool:
+    """True if any event has already been recorded for this primary
+    source ID (e.g. an FR document number). Used to dedup action-tier
+    ingestion before fetching the document body."""
+    row = conn.execute(
+        "SELECT 1 FROM events WHERE primary_source_id = ? LIMIT 1",
+        (primary_source_id,),
+    ).fetchone()
+    return row is not None
 
 
 def get_events_since(
@@ -237,6 +284,7 @@ def get_latest_event_per_article(
             e.id, e.event_title, e.categories, e.impact_direction,
             e.impact_magnitude, e.neutral_summary, e.framing_indicators,
             e.confidence, e.is_relevant, e.extracted_at, e.prompt_version,
+            e.tier, e.primary_source_id,
             a.title AS article_title, a.url AS article_url,
             a.published_date,
             s.name AS source_name, s.bias

@@ -2,8 +2,31 @@ PROJECT: Pressy
 
 Pressy is a self-hosted dashboard that tracks the performance of the
 current US presidential administration across ten policy and governance
-categories, updated by curated news events from across the political
-spectrum.
+categories. It pulls signal from multiple tiers — news framing,
+primary-source government actions, and (planned) downstream outcomes —
+and surfaces per-category scores plus an outlook trend.
+
+TIERS
+Pressy events are tagged with a `tier`:
+- framing  — events extracted from curated news articles via the RSS
+             ingest pipeline (src/ingest.py + src/extract.py using
+             prompts/extract_event.txt).
+- action   — events extracted from primary-source government documents
+             via src/ingest_actions.py + src/pipeline_actions.py using
+             prompts/extract_action.txt. The first action source is
+             the Federal Register (executive orders, proclamations,
+             memoranda, presidential determinations, and significant
+             final rules).
+- outcome  — planned: downstream metrics from official statistical
+             agencies (BLS, BEA, FRED, etc.) that confirm or contradict
+             the signal from framing and action events. Not yet
+             implemented.
+
+src/show_scores.py renders per-category sub-scores for each active
+tier plus a provisional 50/50 framing/action blend. Real blend
+weights will be calibrated once enough action-tier data has
+accumulated; the scoring spec (docs/scoring.md) has not yet been
+updated to formalize the blend, and that update needs analyst input.
 
 YOUR ROLE
 You are the technical and analytical collaborator for Pressy. Help with:
