@@ -1,0 +1,85 @@
+# Pressy source list. AllSides bias ratings are canonical.
+#
+# Substitutions from the original spec (AP/Reuters/BBC, Fox/WashEx/NYPost,
+# NPR/MSNBC/HuffPost):
+#   - AP News: feeds.apnews.com no longer resolves; substituted Christian
+#     Science Monitor (Center on AllSides) for one center slot.
+#   - Reuters: discontinued public RSS in 2020. Substitution chain:
+#       Hill → Politico → Axios → WSJ Opinion.
+#       * The Hill: RSS works, but article URLs 403 on trafilatura
+#         (all 10 articles failed on the first real run).
+#       * Politico: every politico.com/rss/* URL returns Cloudflare's
+#         "Just a moment..." JS challenge page (HTTP 403).
+#       * Axios: api.axios.com/feed/ returns valid RSS, but every
+#         article URL is hard-blocked by Cloudflare (12/12 trafilatura
+#         403s on the second real run).
+#       * WSJ politics-specific feeds are gone:
+#           feeds.a.dj.com/rss/RSSPolitics.xml → 403 AccessDenied
+#           wsj.com/news/rss/politics          → 404
+#         Working WSJ feeds: WorldNews (Center per AllSides), USBusiness
+#         (Center), Opinion (Lean Right). Using RSSOpinion.xml because
+#         it's the only WSJ feed AllSides specifically rates Lean Right
+#         and is the most political of the three. NOTE: WSJ Opinion
+#         articles are editorial/op-ed, so the extraction prompt will
+#         tag them confidence: low. Useful as framing signal, not as
+#         primary factual reporting. Bucket label is "lean_right" since
+#         that's the actual content; this means we now have 2 Center
+#         outlets instead of 3, which is acceptable for a personal-scale
+#         pipeline.
+#         WSJ also has a hard paywall — trafilatura may only recover
+#         lede + meta-description text. Articles below MIN_BODY_CHARS
+#         will be skipped silently.
+#       * WSJ Opinion removed: editorial-only sources should not feed
+#         coverage_lean counts. Center underweight is now 2 outlets
+#         (BBC, CSM); accepting this until a working center news
+#         source is identified.
+#   - MSNBC: msnbc.com/feeds/* return the homepage HTML rather than feed
+#     XML; substituted Mother Jones (Left on AllSides) for one left slot.
+#
+# All URLs verified live (HTTP 200 + valid RSS/Atom XML) at the time of
+# this commit. If a feed breaks later, replace it with another outlet
+# from the same bias bucket and add a comment noting the substitution.
+
+sources:
+  # ----- CENTER -----
+  - name: "BBC News (Politics)"
+    rss: "https://feeds.bbci.co.uk/news/politics/rss.xml"
+    bias: center
+    bias_source: AllSides
+
+  - name: "Christian Science Monitor (USA)"
+    rss: "https://rss.csmonitor.com/feeds/usa"
+    bias: center
+    bias_source: AllSides
+
+  # ----- RIGHT -----
+  - name: "Fox News (Politics)"
+    rss: "https://moxie.foxnews.com/google-publisher/politics.xml"
+    bias: right
+    bias_source: AllSides
+
+  - name: "Washington Examiner (Policy)"
+    rss: "https://www.washingtonexaminer.com/section/policy/feed/"
+    bias: lean_right
+    bias_source: AllSides
+
+  - name: "New York Post (Politics)"
+    rss: "https://nypost.com/politics/feed/"
+    bias: lean_right
+    bias_source: AllSides
+
+  # ----- LEFT -----
+  - name: "NPR (Politics)"
+    rss: "https://feeds.npr.org/1014/rss.xml"
+    bias: lean_left
+    bias_source: AllSides
+
+  - name: "HuffPost (Politics)"
+    rss: "https://www.huffpost.com/section/politics/feed"
+    bias: left
+    bias_source: AllSides
+
+  - name: "Mother Jones (Politics)"
+    rss: "https://www.motherjones.com/politics/feed/"
+    bias: left
+    bias_source: AllSides

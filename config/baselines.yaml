@@ -1,0 +1,47 @@
+categories:
+  economy:
+    baseline: 52
+    band_size: 15
+    weight: 1.0
+  jobs:
+    baseline: 55
+    band_size: 15
+    weight: 1.0
+  housing:
+    baseline: 48
+    band_size: 10
+    weight: 1.0
+  health:
+    baseline: 38
+    band_size: 15
+    weight: 1.0
+  education:
+    baseline: 42
+    band_size: 10
+    weight: 1.0
+  science:
+    baseline: 28
+    band_size: 15
+    weight: 1.0
+  international:
+    baseline: 40
+    band_size: 20
+    weight: 1.0
+  constitutional:
+    baseline: 18
+    band_size: 20
+    weight: 1.0
+  moral:
+    baseline: 25
+    band_size: 15
+    weight: 1.0
+  institutional:
+    baseline: 20
+    band_size: 20
+    weight: 1.0
+
+term_start_date: "2025-01-20"
+
+baseline_changelog:
+  - date: "2026-04-27"
+    rationale: "Initial baselines from analyst assessment per project setup"
