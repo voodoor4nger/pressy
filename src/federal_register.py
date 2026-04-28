@@ -21,6 +21,7 @@ We deliberately skip:
 from __future__ import annotations
 
 import logging
+import re
 import time
 from datetime import date, timedelta
 from typing import Iterator, List, Optional
@@ -50,6 +51,16 @@ DOCUMENT_FIELDS = (
 PER_PAGE = 100  # API max
 MIN_REQUEST_INTERVAL_SECONDS = 1.0
 REQUEST_TIMEOUT_SECONDS = 30
+
+# Hard ceiling on document body length. Final Rules can run hundreds
+# of pages and would blow up our LLM context budget. Truncating to the
+# preamble + early operative text is sufficient for scoring purposes;
+# the full document remains accessible at its FR URL for review.
+MAX_DOCUMENT_CHARS = 50_000
+
+# Match the FR `document_number` shape (e.g. "2026-08126") inside a
+# raw_text_url. Used purely to enrich the truncation log message.
+_DOC_ID_RE = re.compile(r"/(\d{4}-\d+)\.txt(?:$|[?#])")
 
 
 # Maps Federal Register `subtype` (PRESDOCU) and `type` strings to our
@@ -245,4 +256,14 @@ def fetch_document_text(
         raise FederalRegisterError(
             f"FR document fetch failed for {raw_text_url}: {e}"
         ) from e
-    return resp.text.strip()
+
+    text = resp.text.strip()
+    if len(text) > MAX_DOCUMENT_CHARS:
+        m = _DOC_ID_RE.search(raw_text_url)
+        doc_id = m.group(1) if m else raw_text_url
+        log.warning(
+            "FR document %s text is %d chars; truncating to %d.",
+            doc_id, len(text), MAX_DOCUMENT_CHARS,
+        )
+        text = text[:MAX_DOCUMENT_CHARS]
+    return text

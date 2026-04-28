@@ -139,4 +139,42 @@ class GeminiClient:
         text = (response.text or "").strip()
         if not text:
             raise ValueError("Gemini returned empty response")
-        return json.loads(text)
+        parsed = json.loads(text)
+        return self._coerce_to_event_dict(parsed)
+
+    @staticmethod
+    def _coerce_to_event_dict(parsed) -> dict:
+        """Validate that the parsed JSON is an object (or salvage a
+        single-object list).
+
+        The schema asks for a JSON object. Gemini almost always
+        complies, but in rare cases it wraps the object in a list (the
+        WHCD-arraignment article in the v2->v3 backfill triggered this:
+        the model emitted `[ {...event...} ]` and downstream code's
+        `event['source'] = ...` raised "list indices must be integers".)
+
+        Tolerate single-element lists by unwrapping; raise a clear
+        ValueError otherwise so the JSON-retry path with the strict
+        suffix can take a second swing.
+        """
+        if isinstance(parsed, dict):
+            return parsed
+        if isinstance(parsed, list):
+            if parsed and isinstance(parsed[0], dict):
+                log.warning(
+                    "Gemini returned a JSON list of %d element(s); "
+                    "using the first object as the event",
+                    len(parsed),
+                )
+                return parsed[0]
+            inner = (
+                "empty list" if not parsed
+                else f"list of {type(parsed[0]).__name__}"
+            )
+            raise ValueError(
+                f"Gemini returned a JSON {inner}; expected an object"
+            )
+        raise ValueError(
+            f"Gemini returned JSON of type {type(parsed).__name__}; "
+            f"expected an object"
+        )

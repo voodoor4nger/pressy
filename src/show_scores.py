@@ -162,8 +162,16 @@ def render_summary(framing_result, action_result, out=sys.stdout) -> None:
         baseline = (f or a)["baseline"]
         framing_score = (f or a)["score"] if f is None else f["score"]
         action_score = (a or f)["score"] if a is None else a["score"]
-        blend_score = _category_blend(framing_score, action_score)
         outlook = (f or a)["outlook"]
+
+        # Blend is only meaningful once this category has at least
+        # one action-tier event. Otherwise it would just dilute the
+        # framing signal toward the baseline; show "—" instead.
+        cat_has_action = bool(a and a["contributing_events"])
+        if cat_has_action:
+            blend_str = str(int(round(_category_blend(framing_score, action_score))))
+        else:
+            blend_str = "—"
 
         label = CATEGORY_DISPLAY[cat]
         print(
@@ -171,7 +179,7 @@ def render_summary(framing_result, action_result, out=sys.stdout) -> None:
             f"{baseline:>10}"
             f"{int(round(framing_score)):>10}"
             f"{int(round(action_score)):>10}"
-            f"{int(round(blend_score)):>10}"
+            f"{blend_str:>10}"
             f"   {outlook}",
             file=out,
         )
@@ -179,13 +187,16 @@ def render_summary(framing_result, action_result, out=sys.stdout) -> None:
     print("", file=out)
     framing_composite = int(round(framing_result.composite))
     action_composite = int(round(action_result.composite))
-    blend_composite = int(round(_category_blend(
-        framing_result.composite, action_result.composite,
-    )))
+    if action_result.event_count_in_window > 0:
+        blend_composite_str = str(int(round(_category_blend(
+            framing_result.composite, action_result.composite,
+        ))))
+    else:
+        blend_composite_str = "—"
     print(
         f"Composite — framing: {framing_composite}  "
         f"action: {action_composite}  "
-        f"blend: {blend_composite}  "
+        f"blend: {blend_composite_str}  "
         f"({framing_result.composite_outlook} framing outlook)",
         file=out,
     )
